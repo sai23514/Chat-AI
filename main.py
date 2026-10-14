@@ -13,13 +13,15 @@ import os
 import random
 import threading
 import time
-import uuid
+import uuid 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
 from dotenv import load_dotenv
-from fastapi import File, UploadFile
+from fastapi import File, Form, UploadFile
+import re
+import shutil
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from openai import OpenAI
@@ -153,7 +155,7 @@ def build_messages(question: str, session_id: str) -> tuple[list[dict[str, str]]
     # Short follow-ups ("explain more") search better with the previous question attached.
     last_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
     query = f"{last_user}\n{question}" if last_user and len(question.split()) < 8 else question
-    hits = rag.search(query, k=TOP_K, min_score=MIN_SCORE)
+    hits = rag.search(query, k=TOP_K, min_score=MIN_SCORE, session_id=session_id)
 
     sources: list[str] = []
     for hit in hits:
@@ -267,24 +269,50 @@ _upload_lock = threading.Lock()
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
 
 
+SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def check_session(session_id: str) -> str:
+    if not SAFE_ID.match(session_id or ""):
+        raise HTTPException(400, "Invalid session_id.")
+    return session_id
+
+
 @app.post("/upload")
-def upload(file: UploadFile = File(...)):
+def upload(file: UploadFile = File(...), session_id: str = Form(...)):
+    session_id = check_session(session_id)
     name = Path(file.filename or "").name
     if Path(name).suffix.lower() not in rag.SUPPORTED:
         raise HTTPException(400, f"Unsupported file. Allowed: {', '.join(sorted(rag.SUPPORTED))}")
     data = file.file.read()
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"File is larger than {MAX_UPLOAD_MB} MB.")
-    rag.DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    path = rag.DOCS_DIR / name
+    folder = rag.UPLOAD_DIR / session_id          # uploads/<chat>/file.pdf
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
     path.write_bytes(data)
     try:
         with _upload_lock:
-            chunks = rag.add_file(path)
+            chunks = rag.add_file(path, session_id)
     except Exception as error:
+        path.unlink(missing_ok=True)
         logger.exception("Upload failed")
         raise HTTPException(422, str(error)) from None
     return {"file": name, "chunks": chunks}
+
+
+@app.delete("/files")
+def delete_files(session_id: str, name: str | None = None):
+    """Remove one file from a chat, or all of a chat's files when no name is given."""
+    session_id = check_session(session_id)
+    with _upload_lock:
+        removed = rag.remove_files(session_id, Path(name).name if name else None)
+    folder = rag.UPLOAD_DIR / session_id
+    if name:
+        (folder / Path(name).name).unlink(missing_ok=True)
+    elif folder.is_dir():
+        shutil.rmtree(folder, ignore_errors=True)
+    return {"removed_chunks": removed}
 
 
 @app.post("/chat", response_model=ChatResponse)

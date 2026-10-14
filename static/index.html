@@ -237,6 +237,12 @@
     .attach:disabled { opacity: .5; cursor: progress; }
     .attach.loading svg { animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+     .file-chips { max-width: 820px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .file-chips:empty { display: none; }
+    .file-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 5px 6px 5px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); font-size: 12.5px; color: var(--text); }
+    .file-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-chip button { width: 20px; height: 20px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; flex-shrink: 0; }
+    .file-chip button:hover { background: var(--border); color: var(--text); }
     .hint { max-width: 820px; margin: 8px auto 0; display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); padding: 0 4px; }
     kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
     .counter.over { color: var(--danger); font-weight: 600; }
@@ -360,6 +366,7 @@
     <main id="scroller"><div class="thread" id="thread"></div></main>
 
     <footer class="composer-wrap">
+      <div class="file-chips" id="fileChips"></div>
       <form class="composer" id="form" autocomplete="off">
         <label for="input" class="sr-only">Message</label>
         <textarea id="input" rows="1" placeholder="Ask here..." maxlength="5000"></textarea>
@@ -637,6 +644,7 @@
       const c = chats.find((x) => x.id === id);
       if (!c || !confirm(`Delete "${c.title}"?`)) return;
       if (id === activeId) controller?.abort();
+      if (c.sessionId && c.files?.length) fetch(`/files?session_id=${encodeURIComponent(c.sessionId)}`, { method: "DELETE" }).catch(() => {});
       chats = chats.filter((x) => x.id !== id); saveChats();
       if (id === activeId) newChat(); else renderHistory();
       toast("Chat deleted");
@@ -680,12 +688,14 @@
         });
       }
       updateTitle();
+       renderFiles();
       requestAnimationFrame(() => scroller.scrollTop = scroller.scrollHeight);
     }
 
     function newChat() {
       if (busy) controller?.abort();
       activeId = null;
+      pending = { sessionId: null, files: [] };
       renderThread(); renderHistory();
       if (isMobile()) setSidebar(false);
       input.focus();
@@ -791,8 +801,9 @@
       // Create the chat on the first message
       let chat = activeChat();
       if (!chat) {
-        chat = { id: uid(), title: text.length > 42 ? text.slice(0, 42).trimEnd() + "…" : text, sessionId: null, created: Date.now(), updated: Date.now(), messages: [] };
+         chat = { id: uid(), title: text.length > 42 ? text.slice(0, 42).trimEnd() + "…" : text, sessionId: pending.sessionId, files: pending.files, created: Date.now(), updated: Date.now(), messages: [] };
         chats.push(chat); activeId = chat.id;
+        pending = { sessionId: null, files: [] };
       }
       if (!isRetry) {
         chat.messages.push({ role: "user", text, ts: Date.now() });
@@ -875,30 +886,68 @@
       const text = input.value; input.value = ""; updateComposer(); send(text);
     });
     input.addEventListener("input", updateComposer);
-     const fileInput = $("fileInput"), attachBtn = $("attachBtn");
+      /* ===== Files attached to the current chat ===== */
+    let pending = { sessionId: null, files: [] };   // files added before the first message
+    const fileInput = $("fileInput"), attachBtn = $("attachBtn");
+
+    function chatSession() {
+      const c = activeChat();
+      if (!c) return (pending.sessionId ||= uid());
+      if (!c.sessionId) { c.sessionId = uid(); saveChats(); }
+      return c.sessionId;
+    }
+    function chatFiles() {
+      const c = activeChat();
+      if (!c) return pending.files;
+      return (c.files ||= []);
+    }
+    function renderFiles() {
+      const box = $("fileChips");
+      box.innerHTML = "";
+      chatFiles().forEach((name) => {
+        const chip = document.createElement("div");
+        chip.className = "file-chip";
+        chip.innerHTML = ICONS.file + '<span></span><button type="button" aria-label="Remove file">✕</button>';
+        chip.querySelector("span").textContent = name;
+        chip.title = name;
+        chip.querySelector("button").onclick = () => removeFile(name);
+        box.appendChild(chip);
+      });
+    }
+    async function removeFile(name) {
+      const session = chatSession();
+      try {
+        const res = await fetch(`/files?session_id=${encodeURIComponent(session)}&name=${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!res.ok) throw new Error();
+      } catch { return toast(`Couldn't remove ${name}`); }
+      const list = chatFiles();
+      list.splice(list.indexOf(name), 1);
+      saveChats(); renderFiles(); toast(`Removed ${name}`);
+    }
+
     attachBtn.onclick = () => fileInput.click();
     fileInput.onchange = async () => {
       const files = [...fileInput.files];
       fileInput.value = "";
       if (!files.length) return;
+      const session = chatSession(), list = chatFiles();
       attachBtn.disabled = true; attachBtn.classList.add("loading");
-      const added = [];
       for (const f of files) {
         toast(`Reading ${f.name}…`);
         try {
-          const body = new FormData(); body.append("file", f);
+          const body = new FormData();
+          body.append("file", f);
+          body.append("session_id", session);
           const res = await fetch("/upload", { method: "POST", body });
           const data = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(data.detail || `Upload failed (${res.status})`);
-          added.push(data.file);
+          if (!list.includes(data.file)) list.push(data.file);
+          saveChats(); renderFiles();
+          toast(`Added ${data.file}. Ask away!`);
         } catch (err) { toast(`${f.name}: ${err.message}`); }
       }
       attachBtn.disabled = false; attachBtn.classList.remove("loading");
-      if (added.length) {
-        toast(`Added ${added.join(", ")}. Ask away!`);
-        input.placeholder = `Ask about ${added[added.length - 1]}…`;
-        checkHealth(); input.focus();
-      }
+      input.focus();
     };
     input.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" || e.isComposing) return;
