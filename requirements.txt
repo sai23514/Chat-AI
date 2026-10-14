@@ -7,3 +7,5 @@ numpy
 fastembed
 pypdf
 python-docx
+ddgs
+httpx
