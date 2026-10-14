@@ -1,4 +1,4 @@
-# Document Q&A Chatbot (multi-provider)
+Chat AI (multi-provider)
 
 Answers questions from your own documents. Document search runs locally, so
 Gemini, Groq and OpenRouter all use the same files. If one provider is busy or
