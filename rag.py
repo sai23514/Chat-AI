@@ -1,8 +1,7 @@
 """Local document search (RAG) shared by every AI provider.
 
-ingest.py calls build_index() to read ./docs, split it into chunks, embed them
-on your own computer (no API key needed) and save them in ./index.
-main.py calls search() to find the chunks that best match a question.
+Shared files: put them in ./docs and run ingest.py (every chat can use them).
+Chat files: uploaded with the + button; only that chat can search them.
 """
 from __future__ import annotations
 
@@ -18,6 +17,7 @@ logger = logging.getLogger("document-chatbot.rag")
 
 DOCS_DIR = Path(os.getenv("DOCS_DIR", "docs"))
 INDEX_DIR = Path(os.getenv("INDEX_DIR", "index"))
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 CHUNK_CHARS = int(os.getenv("CHUNK_CHARS", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
@@ -96,7 +96,7 @@ def build_index() -> int:
         count = 0
         for page, text in pages:
             for piece in split_text(text):
-                chunks.append({"text": piece, "file": path.name, "page": page})
+                chunks.append({"text": piece, "file": path.name, "page": page, "session": ""})
                 count += 1
         print(f"  {path.name}: {count} chunks")
 
@@ -104,35 +104,61 @@ def build_index() -> int:
         raise SystemExit("No text could be extracted. Scanned PDFs need OCR first.")
 
     print(f"Embedding {len(chunks)} chunks locally with {EMBED_MODEL} ...")
-    vectors = np.array(list(embedder().embed([c["text"] for c in chunks])), dtype=np.float32)
-    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
+    vectors = _embed([c["text"] for c in chunks])
 
+    # Keep files that were uploaded in chats; only the shared docs/ part is rebuilt.
+    load_index()
+    keep = [i for i, c in enumerate(_chunks or []) if c.get("session")]
+    if keep and _vectors is not None:
+        chunks = [_chunks[i] for i in keep] + chunks
+        vectors = np.vstack([_vectors[keep], vectors])
+    _save(chunks, vectors)
+    return len(chunks)
+
+
+def _embed(texts: list[str]) -> np.ndarray:
+    vectors = np.array(list(embedder().embed(texts)), dtype=np.float32)
+    return vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12)
+
+
+def _save(chunks: list[dict], vectors: np.ndarray) -> None:
+    global _chunks, _vectors
+    _chunks, _vectors = chunks, vectors
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     np.save(INDEX_DIR / "vectors.npy", vectors)
     (INDEX_DIR / "chunks.json").write_text(json.dumps(chunks, ensure_ascii=False), encoding="utf-8")
-    return len(chunks)
 
-def add_file(path: Path) -> int:
-    """Add one uploaded file to the existing index without rebuilding everything."""
-    global _chunks, _vectors
+
+def add_file(path: Path, session_id: str) -> int:
+    """Add one file uploaded in a chat. Only that chat (session_id) can search it."""
     if path.suffix.lower() not in SUPPORTED:
         raise ValueError(f"Unsupported file type: {path.suffix}")
     has_index()  # make sure the current index is loaded
-    new = [{"text": piece, "file": path.name, "page": page}
+    new = [{"text": piece, "file": path.name, "page": page, "session": session_id}
            for page, text in read_pages(path) for piece in split_text(text)]
     if not new:
         raise ValueError("No text could be extracted from this file.")
-    vecs = np.array(list(embedder().embed([c["text"] for c in new])), dtype=np.float32)
-    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
-    # Drop old chunks of a file with the same name, then append the new ones.
-    keep = [i for i, c in enumerate(_chunks or []) if c["file"] != path.name]
-    old_vecs = _vectors[keep] if _vectors is not None and keep else np.empty((0, vecs.shape[1]), np.float32)
-    _chunks = [_chunks[i] for i in keep] + new
-    _vectors = np.vstack([old_vecs, vecs])
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    np.save(INDEX_DIR / "vectors.npy", _vectors)
-    (INDEX_DIR / "chunks.json").write_text(json.dumps(_chunks, ensure_ascii=False), encoding="utf-8")
+    vecs = _embed([c["text"] for c in new])
+    # Same file uploaded again in the same chat replaces the old copy.
+    keep = [i for i, c in enumerate(_chunks or [])
+            if not (c.get("session") == session_id and c["file"] == path.name)]
+    old = _vectors[keep] if _vectors is not None and keep else np.empty((0, vecs.shape[1]), np.float32)
+    _save([_chunks[i] for i in keep] + new, np.vstack([old, vecs]))
     return len(new)
+
+
+def remove_files(session_id: str, name: str | None = None) -> int:
+    """Remove one file (or every file) uploaded in a chat. Returns chunks removed."""
+    if not has_index() or not session_id:
+        return 0
+    def gone(c: dict) -> bool:
+        return c.get("session") == session_id and (name is None or c["file"] == name)
+    keep = [i for i, c in enumerate(_chunks) if not gone(c)]
+    removed = len(_chunks) - len(keep)
+    if removed:
+        _save([_chunks[i] for i in keep], _vectors[keep] if keep else np.empty((0, _vectors.shape[1]), np.float32))
+    return removed
+
 
 def load_index() -> bool:
     global _chunks, _vectors
@@ -153,15 +179,18 @@ def has_index() -> bool:
     return bool(_chunks)
 
 
-def search(query: str, k: int = 5, min_score: float = 0.35) -> list[dict]:
-    """Return the k best chunks as dicts with text, file, page, score."""
+def search(query: str, k: int = 5, min_score: float = 0.35, session_id: str | None = None) -> list[dict]:
+    """Best chunks from the shared docs/ folder plus this chat's own uploads."""
     if not has_index():
+        return []
+    allowed = np.array([not c.get("session") or c.get("session") == session_id for c in _chunks])
+    if not allowed.any():
         return []
     q = np.array(next(iter(embedder().query_embed(query))), dtype=np.float32)
     q /= np.linalg.norm(q) + 1e-12
-    scores = _vectors @ q
+    scores = np.where(allowed, _vectors @ q, -1.0)
     best = np.argsort(-scores)[:k]
-    top = float(scores[best[0]]) if len(best) else 0.0
+    top = float(scores[best[0]])
     # Keep chunks that pass the minimum and are close to the best match.
     return [
         {**_chunks[i], "score": float(scores[i])}
