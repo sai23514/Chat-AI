@@ -1,0 +1,42 @@
+RANDOM KNOWLEDGE GUIDE
+======================
+
+1. What is photosynthesis?
+Photosynthesis is the process by which green plants use sunlight, water, and carbon dioxide to make sugars. Oxygen is released as a by-product.
+
+2. What is the solar system?
+The solar system consists of the Sun and the objects held by its gravity, including eight planets, dwarf planets, moons, asteroids, and comets.
+
+3. What is EPF?
+Employees' Provident Fund (EPF) is a retirement savings scheme for eligible employees in India. Contributions are generally made by both the employee and employer under applicable rules.
+
+4. Why do we recycle?
+Recycling processes used materials into new products. It can reduce waste sent to landfills and lower demand for some raw materials.
+
+5. What is an API?
+An Application Programming Interface (API) defines how software components communicate and exchange data.
+
+6. What is Python?
+Python is a general-purpose programming language often used for automation, web development, data analysis, and artificial intelligence.
+
+7. How can people save electricity?
+Common methods include switching off unused lights, using efficient appliances, improving insulation, and choosing LED lighting.
+
+8. What is a healthy study habit?
+A useful study routine includes clear goals, focused sessions, short breaks, practice questions, and regular revision.
+
+9. What causes rain?
+Rain forms when water vapor cools and condenses into droplets in clouds. When droplets become heavy enough, they fall to the ground.
+
+10. What is cybersecurity?
+Cybersecurity involves protecting devices, networks, applications, and information from unauthorized access, misuse, or disruption.
+
+11. What is a database?
+A database is an organized collection of information that can be stored, searched, updated, and managed.
+
+12. What is teamwork?
+Teamwork is people coordinating their skills and efforts to achieve a shared goal.
+
+NOTE
+----
+This is sample test content for experimenting with a document Q&A chatbot. It is not official legal, financial, medical, or tax advice.
