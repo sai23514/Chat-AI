@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -33,6 +33,7 @@ logger = logging.getLogger("document-chatbot")
 
 import rag  # noqa: E402  (after load_dotenv so it sees .env settings)
 import websearch  # noqa: E402
+import auth  # noqa: E402  (step 11: accounts and login)
 
 STATIC_INDEX = Path(os.getenv("STATIC_INDEX", "static/index.html"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES_PER_PROVIDER", "2"))
@@ -276,6 +277,7 @@ def friendly_error(error: Exception) -> str:
 # ------------------------------------------------------------------ API
 app = FastAPI(title="Chat AI", version="3.1.0",
               description="General AI chat with optional document Q&A and Gemini, Groq and OpenRouter failover.")
+app.include_router(auth.router)  # /auth/signup, /auth/login, /auth/logout, /auth/me
 
 
 MAX_IMAGES = 3
@@ -350,7 +352,7 @@ def health():
 
 
 @app.get("/models")
-def models():
+def models(user: dict = Depends(auth.current_user)):
     """Providers for the model picker (only the ones with an API key in .env)."""
     return [{"id": p.name.lower(), "label": f"{p.name} ({p.model})"} for p in PROVIDERS]
 
@@ -364,7 +366,7 @@ _groq = next((p for p in PROVIDERS if p.name == "Groq"), None)
 
 
 @app.post("/transcribe")
-def transcribe(audio: UploadFile = File(...)):
+def transcribe(audio: UploadFile = File(...), user: dict = Depends(auth.current_user)):
     """Turn a short voice recording from the mic button into text."""
     if not _groq:
         raise HTTPException(503, "Voice input needs GROQ_API_KEY in .env.")
@@ -413,8 +415,10 @@ def check_session(session_id: str) -> str:
 
 
 @app.post("/upload")
-def upload(file: UploadFile = File(...), session_id: str = Form(...)):
+def upload(file: UploadFile = File(...), session_id: str = Form(...),
+           user: dict = Depends(auth.current_user)):
     session_id = check_session(session_id)
+    auth.own_chat(session_id, user)
     name = Path(file.filename or "").name
     if Path(name).suffix.lower() not in rag.SUPPORTED:
         raise HTTPException(400, f"Unsupported file. Allowed: {', '.join(sorted(rag.SUPPORTED))}")
@@ -436,9 +440,14 @@ def upload(file: UploadFile = File(...), session_id: str = Form(...)):
 
 
 @app.delete("/files")
-def delete_files(session_id: str, name: str | None = None):
+def delete_files(session_id: str, name: str | None = None, user: dict = Depends(auth.current_user)):
     """Remove one file from a chat, or all of a chat's files when no name is given."""
     session_id = check_session(session_id)
+    auth.own_chat(session_id, user)
+    return {"removed_chunks": remove_chat_files(session_id, name)}
+
+
+def remove_chat_files(session_id: str, name: str | None = None) -> int:
     with _upload_lock:
         removed = rag.remove_files(session_id, Path(name).name if name else None)
     folder = rag.UPLOAD_DIR / session_id
@@ -446,21 +455,24 @@ def delete_files(session_id: str, name: str | None = None):
         (folder / Path(name).name).unlink(missing_ok=True)
     elif folder.is_dir():
         shutil.rmtree(folder, ignore_errors=True)
-    return {"removed_chunks": removed}
+    return removed
 
 
 @app.delete("/chats")
-def delete_chat(session_id: str):
+def delete_chat(session_id: str, user: dict = Depends(auth.current_user)):
     """Forget a chat completely: its saved messages and its uploaded files."""
     session_id = check_session(session_id)
+    auth.own_chat(session_id, user)
     messages = delete_history(session_id)
-    files = delete_files(session_id)["removed_chunks"]
+    files = remove_chat_files(session_id)
+    auth.forget_chat(session_id)
     return {"removed_messages": messages, "removed_chunks": files}
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, user: dict = Depends(auth.current_user)):
     session_id = request.session_id or str(uuid.uuid4())
+    auth.own_chat(session_id, user)
     try:
         messages, sources = build_messages(request.message, session_id, request.web, request.images)
         response, provider = ask_ai(messages, stream=False, vision=bool(request.images), prefer=request.model)
@@ -473,8 +485,9 @@ def chat(request: ChatRequest):
 
 
 @app.post("/chat/stream")
-def chat_stream(request: ChatRequest):
+def chat_stream(request: ChatRequest, user: dict = Depends(auth.current_user)):
     session_id = request.session_id or str(uuid.uuid4())
+    auth.own_chat(session_id, user)  # checked before streaming starts
 
     def line(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False) + "\n"

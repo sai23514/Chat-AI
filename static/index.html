@@ -146,6 +146,23 @@
     .icon-btn:hover { background: var(--surface-2); }
     .icon-btn.ghost { border-color: transparent; background: none; }
     .icon-btn.ghost:hover { background: var(--surface-2); }
+    /* ---- login screen (step 11) ---- */
+    .login-wrap { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; background: var(--bg); padding: 20px; }
+    .login-wrap[hidden] { display: none; }
+    .login-card { width: 100%; max-width: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 28px; box-shadow: 0 12px 40px rgba(0,0,0,.08); }
+    .login-card h1 { font-size: 20px; margin: 10px 0 4px; }
+    .login-card p.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; }
+    .login-card label { display: block; font-size: 13px; font-weight: 550; margin: 12px 0 6px; }
+    .login-card input { width: 100%; box-sizing: border-box; height: 42px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
+    .login-card input:focus { outline: none; border-color: var(--accent); }
+    .login-card .primary { width: 100%; height: 42px; margin-top: 18px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    .login-card .primary:disabled { opacity: .6; cursor: progress; }
+    .login-err { color: var(--danger); font-size: 13px; margin-top: 12px; min-height: 1em; }
+    .login-switch { margin-top: 14px; font-size: 13px; color: var(--muted); text-align: center; }
+    .login-switch button { border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; padding: 0; }
+    .account-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px 10px; font-size: 12.5px; color: var(--muted); }
+    .account-row[hidden] { display: none; }
+    .account-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .export-wrap { position: relative; }
     .export-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 190px; padding: 6px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); box-shadow: 0 10px 30px rgba(0,0,0,.18); }
     .export-menu[hidden] { display: none; }
@@ -364,6 +381,10 @@
 
     <!-- Settings section (separate, pinned at bottom) -->
     <div class="sb-foot">
+      <div class="account-row" id="accountRow" hidden>
+        <span id="accountEmail" title="Logged in"></span>
+        <button class="btn-outline" id="logoutBtn" type="button">Log out</button>
+      </div>
       <button class="foot-btn" id="openSettingsBtn">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         Settings
@@ -473,10 +494,43 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+  <!-- ============ LOGIN SCREEN (step 11) ============ -->
+  <div class="login-wrap" id="loginWrap" hidden>
+    <form class="login-card" id="loginForm" autocomplete="on">
+      <div class="logo" aria-hidden="true">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
+      </div>
+      <h1 id="loginTitle">Log in to Chat AI</h1>
+      <p class="sub" id="loginSub">Welcome back.</p>
+      <label for="loginEmail">Email</label>
+      <input id="loginEmail" type="email" autocomplete="username" required maxlength="254">
+      <label for="loginPassword">Password</label>
+      <input id="loginPassword" type="password" autocomplete="current-password" required minlength="8" maxlength="128">
+      <button class="primary" id="loginSubmit" type="submit">Log in</button>
+      <div class="login-err" id="loginErr" role="alert"></div>
+      <div class="login-switch" id="loginSwitchRow"><span id="loginSwitchText">New here?</span> <button type="button" id="loginSwitch">Create an account</button></div>
+    </form>
+  </div>
+
   <script>
   (() => {
+    /* ===== Login (step 11): any 401 from the server shows the login screen ===== */
+    const USER_KEY = "chatai_user";
+    const currentUser = localStorage.getItem(USER_KEY) || "";
+    const _fetch = window.fetch.bind(window);
+    window.fetch = async (url, opts) => {
+      const res = await _fetch(url, opts);
+      if (res.status === 401 && !String(url).startsWith("/auth")) showLogin();
+      return res;
+    };
+
     const MAX_CHARS = 4000;
-    const STORE_KEY = "docuchat_chats_v1";
+    const OLD_STORE_KEY = "docuchat_chats_v1";
+    const STORE_KEY = currentUser ? `${OLD_STORE_KEY}:${currentUser}` : OLD_STORE_KEY;  // each user keeps their own chat list
+    if (currentUser && !localStorage.getItem(STORE_KEY) && localStorage.getItem(OLD_STORE_KEY)) {
+      localStorage.setItem(STORE_KEY, localStorage.getItem(OLD_STORE_KEY));  // first login keeps your old chats
+      localStorage.removeItem(OLD_STORE_KEY);
+    }
     const PREF_KEY = "docuchat_prefs_v1";
     const $ = (id) => document.getElementById(id);
     const thread = $("thread"), scroller = $("scroller"), input = $("input");
@@ -1114,6 +1168,61 @@
       btn.classList.add("speaking"); speakingBtn = btn;
       speechSynthesis.speak(say);
     }
+
+    /* ===== Login screen ===== */
+    const loginWrap = $("loginWrap"), loginForm = $("loginForm");
+    let loginMode = "login";
+    function setLoginMode(mode) {
+      loginMode = mode;
+      const signup = mode === "signup";
+      $("loginTitle").textContent = signup ? "Create your account" : "Log in to Chat AI";
+      $("loginSub").textContent = signup ? "Use at least 8 characters for the password." : "Welcome back.";
+      $("loginSubmit").textContent = signup ? "Sign up" : "Log in";
+      $("loginSwitchText").textContent = signup ? "Have an account?" : "New here?";
+      $("loginSwitch").textContent = signup ? "Log in" : "Create an account";
+      $("loginPassword").autocomplete = signup ? "new-password" : "current-password";
+      $("loginErr").textContent = "";
+    }
+    function showLogin() {
+      if (!loginWrap.hidden) return;
+      loginWrap.hidden = false;
+      setTimeout(() => $("loginEmail").focus(), 50);
+    }
+    $("loginSwitch").onclick = () => setLoginMode(loginMode === "login" ? "signup" : "login");
+    loginForm.onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = $("loginSubmit");
+      btn.disabled = true; $("loginErr").textContent = "";
+      try {
+        const res = await _fetch(`/auth/${loginMode}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: $("loginEmail").value.trim(), password: $("loginPassword").value }),
+        });
+        const d = await res.json();
+        if (!res.ok) {
+          const msg = Array.isArray(d.detail) ? d.detail.map((x) => x.msg.replace(/^Value error, /, "")).join(". ") : d.detail;
+          throw new Error(msg || "Something went wrong");
+        }
+        localStorage.setItem(USER_KEY, d.user.email);
+        location.reload();  // reload so this user's chats load
+      } catch (err) { $("loginErr").textContent = err.message; btn.disabled = false; }
+    };
+    async function checkLogin() {
+      try {
+        const d = await (await _fetch("/auth/me", { cache: "no-store" })).json();
+        if (!d.allow_signup) { $("loginSwitchRow").hidden = true; setLoginMode("login"); }
+        if (!d.auth_enabled) { if (currentUser) { localStorage.removeItem(USER_KEY); location.reload(); } return; }
+        if (!d.user) { showLogin(); return; }
+        if (d.user.email !== currentUser) { localStorage.setItem(USER_KEY, d.user.email); location.reload(); return; }
+        $("accountEmail").textContent = d.user.email;
+        $("accountRow").hidden = false;
+      } catch { /* server offline: the status dot already shows it */ }
+    }
+    $("logoutBtn").onclick = async () => {
+      try { await _fetch("/auth/logout", { method: "POST" }); } catch {}
+      location.reload();
+    };
+    checkLogin();
 
     /* ===== Export (step 10): download the open chat as Markdown, text, PDF or JSON ===== */
     const exportBtn = $("exportBtn"), exportMenu = $("exportMenu");
