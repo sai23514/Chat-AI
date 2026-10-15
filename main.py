@@ -11,19 +11,18 @@ import json
 import logging
 import os
 import random
+import re
+import shutil
+import sqlite3
 import threading
 import time
-import uuid 
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
 from dotenv import load_dotenv
-from fastapi import File, Form, UploadFile
-import re
-import shutil
-import sqlite3
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -41,7 +40,7 @@ RETRY_BASE_SECONDS = float(os.getenv("RETRY_BASE_SECONDS", "1"))
 COOLDOWN_SECONDS = float(os.getenv("PROVIDER_COOLDOWN_SECONDS", "60"))
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "6"))
 TOP_K = int(os.getenv("TOP_K", "5"))
-MIN_SCORE = float(os.getenv("MIN_SCORE", "0.5"))
+MIN_SCORE = float(os.getenv("MIN_SCORE", "0.6"))
 
 SYSTEM_PROMPT = """You are Chat AI, a friendly, knowledgeable general-purpose assistant.
 - Answer any question: coding, writing, explanations, ideas, everyday help.
@@ -182,8 +181,6 @@ def delete_history(session_id: str) -> int:
         _db.commit()
     return removed
 
-
-# ------------------------------------------------------------------ prompt
 def build_messages(question: str, session_id: str, web: bool = False,
     images: list[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     history = get_history(session_id)
@@ -218,6 +215,7 @@ def build_messages(question: str, session_id: str, web: bool = False,
     if images:
         content = [{"type": "text", "text": content},
                    *({"type": "image_url", "image_url": {"url": url}} for url in images)]
+
     today = time.strftime("%A, %d %B %Y")
     messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n\nToday's date is {today}."}, *history,
                 {"role": "user", "content": content}]
@@ -225,10 +223,15 @@ def build_messages(question: str, session_id: str, web: bool = False,
 
 
 # ------------------------------------------------------------------ calling AI
-def ask_ai(messages: list[dict[str, Any]], *, stream: bool, vision: bool = False):
-    """Try providers in order. Returns (response, provider). vision=True uses each provider's image model."""
+def ask_ai(messages: list[dict[str, Any]], *, stream: bool, vision: bool = False, prefer: str = "auto"):
+    """Try providers in order. Returns (response, provider). vision=True uses each provider's image model.
+    prefer = a provider name from the model picker ("gemini", "groq"...), tried first; "auto" = normal order."""
     last_error: Exception | None = None
-    for provider in provider_order():
+    order = provider_order()
+    chosen = [p for p in PROVIDERS if p.name.lower() == prefer.lower()]
+    if chosen:  # the picked one goes first (even if cooling down); the rest are the fallback
+        order = chosen + [p for p in order if p is not chosen[0]]
+    for provider in order:
         for attempt in range(MAX_RETRIES):
             if attempt:
                 time.sleep(RETRY_BASE_SECONDS * (2 ** attempt) + random.uniform(0, 0.5))
@@ -273,6 +276,7 @@ def friendly_error(error: Exception) -> str:
 app = FastAPI(title="Chat AI", version="3.1.0",
               description="General AI chat with optional document Q&A and Gemini, Groq and OpenRouter failover.")
 
+
 MAX_IMAGES = 3
 MAX_IMAGE_CHARS = 7_000_000  # about 5 MB of image after base64
 IMAGE_DATA_URL = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$")
@@ -284,7 +288,8 @@ class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
     web: bool = False  # True = always search the web for this message
     images: list[str] = Field(default_factory=list, max_length=MAX_IMAGES)  # data:image/...;base64,...
-    
+    model: str = Field(default="auto", max_length=40)  # model picker: "auto" or a provider name
+
     @field_validator("images")
     @classmethod
     def check_images(cls, value: list[str]) -> list[str]:
@@ -341,6 +346,13 @@ def health():
         "providers": [f"{p.name} ({p.model})" for p in PROVIDERS],
     }
 
+
+@app.get("/models")
+def models():
+    """Providers for the model picker (only the ones with an API key in .env)."""
+    return [{"id": p.name.lower(), "label": f"{p.name} ({p.model})"} for p in PROVIDERS]
+
+
 _upload_lock = threading.Lock()
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
 
@@ -390,13 +402,14 @@ def delete_files(session_id: str, name: str | None = None):
         shutil.rmtree(folder, ignore_errors=True)
     return {"removed_chunks": removed}
 
+
 @app.delete("/chats")
 def delete_chat(session_id: str):
     """Forget a chat completely: its saved messages and its uploaded files."""
     session_id = check_session(session_id)
     messages = delete_history(session_id)
     files = delete_files(session_id)["removed_chunks"]
-    return {"removed_messages": messages, "removed_chunks": files}    
+    return {"removed_messages": messages, "removed_chunks": files}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -404,7 +417,7 @@ def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     try:
         messages, sources = build_messages(request.message, session_id, request.web, request.images)
-        response, provider = ask_ai(messages, stream=False, vision=bool(request.images))
+        response, provider = ask_ai(messages, stream=False, vision=bool(request.images), prefer=request.model)
         reply = response.choices[0].message.content or ""
         save_turn(session_id, request.history_text(), reply)
         return ChatResponse(reply=reply, session_id=session_id, sources=sources, provider=provider.name)
@@ -425,8 +438,10 @@ def chat_stream(request: ChatRequest):
         answer = ""
         try:
             messages, sources = build_messages(request.message, session_id, request.web, request.images)
-            stream, provider = ask_ai(messages, stream=True, vision=bool(request.images))
-            yield line({"type": "provider", "name": provider.name, "model": provider.model})
+            stream, provider = ask_ai(messages, stream=True, vision=bool(request.images), prefer=request.model)
+            wanted = next((p.name for p in PROVIDERS if p.name.lower() == request.model.lower()), "")
+            yield line({"type": "provider", "name": provider.name, "model": provider.model,
+                        "fallback": bool(wanted) and wanted != provider.name, "wanted": wanted})
             for chunk in stream:
                 if not chunk.choices:
                     continue
