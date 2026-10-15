@@ -146,6 +146,12 @@
     .icon-btn:hover { background: var(--surface-2); }
     .icon-btn.ghost { border-color: transparent; background: none; }
     .icon-btn.ghost:hover { background: var(--surface-2); }
+    .export-wrap { position: relative; }
+    .export-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 190px; padding: 6px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); box-shadow: 0 10px 30px rgba(0,0,0,.18); }
+    .export-menu[hidden] { display: none; }
+    .export-menu button { display: block; width: 100%; text-align: left; padding: 9px 10px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; font-size: 13.5px; cursor: pointer; }
+    .export-menu button:hover { background: var(--surface-2); }
+    .export-menu small { display: block; color: var(--muted); font-size: 11.5px; }
     #openSidebarBtn, #topNewChat { display: none; }
     body.sidebar-closed #openSidebarBtn, body.sidebar-closed #topNewChat { display: grid; }
 
@@ -377,6 +383,17 @@
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
       </button>
       <div class="chat-title" id="chatTitle">New chat</div>
+      <div class="export-wrap">
+        <button class="icon-btn ghost" id="exportBtn" aria-label="Export chat" title="Export this chat" aria-haspopup="true" aria-expanded="false">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        </button>
+        <div class="export-menu" id="exportMenu" role="menu" hidden>
+          <button data-fmt="md" role="menuitem">Markdown (.md)<small>Keeps headings, lists, code</small></button>
+          <button data-fmt="txt" role="menuitem">Plain text (.txt)<small>Opens anywhere</small></button>
+          <button data-fmt="pdf" role="menuitem">PDF<small>Choose "Save as PDF" in the print window</small></button>
+          <button data-fmt="json" role="menuitem">JSON (.json)<small>Full data, for backups</small></button>
+        </div>
+      </div>
     </header>
 
     <main id="scroller"><div class="thread" id="thread"></div></main>
@@ -1097,6 +1114,96 @@
       btn.classList.add("speaking"); speakingBtn = btn;
       speechSynthesis.speak(say);
     }
+
+    /* ===== Export (step 10): download the open chat as Markdown, text, PDF or JSON ===== */
+    const exportBtn = $("exportBtn"), exportMenu = $("exportMenu");
+    const stamp = (ts) => ts ? new Date(ts).toLocaleString() : "";
+    const fileSafe = (s) => (s || "chat").replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, "_").slice(0, 60) || "chat";
+
+    function chatToMarkdown(c) {
+      const out = [`# ${c.title}`, "", `_Exported from Chat AI on ${stamp(Date.now())}_`, ""];
+      for (const m of c.messages) {
+        out.push(m.role === "user" ? `## 🧑 You  ·  ${stamp(m.ts)}` : `## 🤖 Assistant${m.provider ? ` · ${m.provider}` : ""}  ·  ${stamp(m.ts)}`, "");
+        if (m.files?.length) out.push(`📎 Files: ${m.files.join(", ")}`, "");
+        if (m.thumbs?.length) out.push(`🖼️ ${m.thumbs.length} image(s) attached`, "");
+        out.push(m.text, "");
+        if (m.sources?.length) out.push(`**Sources:** ${m.sources.join(", ")}`, "");
+        out.push("---", "");
+      }
+      return out.join("\n");
+    }
+    function chatToText(c) {
+      const out = [c.title, "=".repeat(Math.min(c.title.length, 60)), ""];
+      for (const m of c.messages) {
+        out.push(`[${stamp(m.ts)}] ${m.role === "user" ? "You" : "Assistant" + (m.provider ? ` · ${m.provider}` : "")}:`);
+        if (m.files?.length) out.push(`Files: ${m.files.join(", ")}`);
+        out.push(m.text);
+        if (m.sources?.length) out.push(`Sources: ${m.sources.join(", ")}`);
+        out.push("");
+      }
+      return out.join("\n");
+    }
+    function download(name, text, type) {
+      const url = URL.createObjectURL(new Blob([text], { type }));
+      const a = Object.assign(document.createElement("a"), { href: url, download: name });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    function exportPdf(c) {
+      const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+      const rows = c.messages.map((m) => `
+        <section class="${m.role}">
+          <div class="who">${m.role === "user" ? "You" : "Assistant" + (m.provider ? ` · ${esc(m.provider)}` : "")}<span>${esc(stamp(m.ts))}</span></div>
+          ${m.files?.length ? `<div class="meta">📎 ${esc(m.files.join(", "))}</div>` : ""}
+          ${(m.thumbs || []).map((src) => `<img src="${src}" alt="">`).join("")}
+          <div class="body">${renderMarkdown(m.text)}</div>
+          ${m.sources?.length ? `<div class="meta">Sources: ${esc(m.sources.join(", "))}</div>` : ""}
+        </section>`).join("");
+      const win = window.open("", "_blank");
+      if (!win) { toast("Allow pop-ups to export PDF"); return; }
+      win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(c.title)}</title>
+        <style>
+          body { font: 14px/1.6 system-ui, "Segoe UI", "Nirmala UI", sans-serif; color: #111; max-width: 760px; margin: 32px auto; padding: 0 20px; }
+          h1 { font-size: 22px; margin: 0 0 4px; } .sub { color: #666; font-size: 12px; margin-bottom: 24px; }
+          section { padding: 14px 16px; margin: 0 0 12px; border-radius: 10px; break-inside: avoid; }
+          section.user { background: #f1f4f9; } section.bot { border: 1px solid #e5e7eb; }
+          .who { font-weight: 600; font-size: 13px; margin-bottom: 6px; display: flex; justify-content: space-between; }
+          .who span, .meta { color: #666; font-weight: 400; font-size: 12px; }
+          pre { background: #f6f8fa; padding: 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
+          code { font-family: Consolas, monospace; font-size: 12.5px; }
+          table { border-collapse: collapse; } td, th { border: 1px solid #ddd; padding: 4px 8px; }
+          img { max-width: 160px; border-radius: 6px; margin: 4px 6px 4px 0; }
+          button, .copy-code { display: none !important; }
+          @page { margin: 16mm; }
+        </style></head><body>
+        <h1>${esc(c.title)}</h1><div class="sub">Exported from Chat AI · ${esc(stamp(Date.now()))}</div>
+        ${rows}</body></html>`);
+      win.document.close();
+      setTimeout(() => { try { win.focus(); win.print(); } catch {} }, 500);  // wait for images to draw
+    }
+    function exportChat(fmt) {
+      const c = activeChat();
+      if (!c || !c.messages.length) { toast("Nothing to export yet"); return; }
+      const base = fileSafe(c.title);
+      if (fmt === "md") download(`${base}.md`, chatToMarkdown(c), "text/markdown;charset=utf-8");
+      else if (fmt === "txt") download(`${base}.txt`, chatToText(c), "text/plain;charset=utf-8");
+      else if (fmt === "json") download(`${base}.json`, JSON.stringify({ title: c.title, created: c.created, messages: c.messages.map(({ thumbs, ...m }) => m) }, null, 2), "application/json");
+      else if (fmt === "pdf") exportPdf(c);
+      if (fmt !== "pdf") toast("Chat exported");
+    }
+    const closeExport = () => { exportMenu.hidden = true; exportBtn.setAttribute("aria-expanded", "false"); };
+    exportBtn.onclick = (e) => {
+      e.stopPropagation();
+      exportMenu.hidden = !exportMenu.hidden;
+      exportBtn.setAttribute("aria-expanded", String(!exportMenu.hidden));
+    };
+    exportMenu.onclick = (e) => {
+      const b = e.target.closest("button[data-fmt]");
+      if (!b) return;
+      closeExport(); exportChat(b.dataset.fmt);
+    };
+    document.addEventListener("click", (e) => { if (!e.target.closest(".export-wrap")) closeExport(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeExport(); });
 
     /* ===== Model picker: Auto = Gemini → Groq → OpenRouter, or pick one (others are the backup) ===== */
     let modelChoice = localStorage.getItem("model") || "auto";
