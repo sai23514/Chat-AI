@@ -1,6 +1,6 @@
 """FastAPI document Q&A chatbot with local document search and AI provider failover.
 
-Order of providers (change with PROVIDER_ORDER): Gemini -> Groq -> OpenRouter.
+Order of providers (change with PROVIDER_ORDER): Gemini -> Groq -> OpenRouter -> Mistral -> Cloudflare -> SambaNova -> Cohere.
 If one is busy (503), out of quota (429), or misconfigured, the next one answers.
 All three use the same documents, found by rag.py on your own machine.
 """
@@ -91,24 +91,66 @@ PROVIDER_SETTINGS = {
         "vision_env": "OPENROUTER_VISION_MODEL", "default_vision_model": "",  # free router picks a vision model
         "extra": {},
     },
+    "cloudflare": {
+        "label": "Cloudflare",
+        "key": "CLOUDFLARE_API_KEY",
+        # {account_id} is filled from CLOUDFLARE_ACCOUNT_ID
+        "base_url": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+        "model_env": "CLOUDFLARE_MODEL", "default_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "vision_env": "CLOUDFLARE_VISION_MODEL", "default_vision_model": "none",  # "none" = skip for images
+        "extra": {},
+    },
+    "mistral": {
+        "label": "Mistral",
+        "key": "MISTRAL_API_KEY",
+        "base_url": "https://api.mistral.ai/v1",
+        "model_env": "MISTRAL_MODEL", "default_model": "mistral-small-latest",
+        "vision_env": "MISTRAL_VISION_MODEL", "default_vision_model": "",  # Mistral Small sees images
+        "extra": {},
+    },
+    "sambanova": {
+        "label": "SambaNova",
+        "key": "SAMBANOVA_API_KEY",
+        "base_url": "https://api.sambanova.ai/v1",
+        "model_env": "SAMBANOVA_MODEL", "default_model": "Meta-Llama-3.3-70B-Instruct",
+        "vision_env": "SAMBANOVA_VISION_MODEL", "default_vision_model": "none",
+        "extra": {},
+    },
+    "cohere": {
+        "label": "Cohere",
+        "key": "COHERE_API_KEY",
+        "base_url": "https://api.cohere.ai/compatibility/v1",
+        "model_env": "COHERE_MODEL", "default_model": "command-a-plus-05-2026",
+        "vision_env": "COHERE_VISION_MODEL", "default_vision_model": "none",
+        "extra": {},
+    },
 }
+
+DEFAULT_ORDER = "gemini,groq,openrouter,mistral,cloudflare,sambanova,cohere"
 
 
 def load_providers() -> list[Provider]:
-    order = [p.strip().lower() for p in os.getenv("PROVIDER_ORDER", "gemini,groq,openrouter").split(",") if p.strip()]
+    order = [p.strip().lower() for p in os.getenv("PROVIDER_ORDER", DEFAULT_ORDER).split(",") if p.strip()]
     providers = []
     for key in order:
         cfg = PROVIDER_SETTINGS.get(key)
         api_key = os.getenv(cfg["key"], "").strip() if cfg else ""
         if not cfg or not api_key:
             continue
-        client = OpenAI(api_key=api_key, base_url=cfg["base_url"], timeout=60, max_retries=0)
+        base_url = cfg["base_url"]
+        if "{account_id}" in base_url:
+            account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+            if not account_id:
+                logger.warning("%s skipped: CLOUDFLARE_ACCOUNT_ID is missing in .env", cfg["label"])
+                continue
+            base_url = base_url.format(account_id=account_id)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=60, max_retries=0)
         model = os.getenv(cfg["model_env"], "").strip() or cfg["default_model"]
         vision_model = os.getenv(cfg["vision_env"], "").strip() or cfg["default_vision_model"] or model
         providers.append(Provider(cfg["label"], client, model, cfg["extra"], vision_model))
         logger.info("Provider ready: %s (%s)", cfg["label"], model)
     if not providers:
-        raise RuntimeError("No API keys found. Set GEMINI_API_KEY, GROQ_API_KEY and/or OPENROUTER_API_KEY in .env")
+        raise RuntimeError("No API keys found. Add at least one key (GEMINI_API_KEY, GROQ_API_KEY, ...) to .env")
     return providers
 
 
@@ -233,6 +275,8 @@ def ask_ai(messages: list[dict[str, Any]], *, stream: bool, vision: bool = False
     chosen = [p for p in PROVIDERS if p.name.lower() == prefer.lower()]
     if chosen:  # the picked one goes first (even if cooling down); the rest are the fallback
         order = chosen + [p for p in order if p is not chosen[0]]
+    if vision:  # skip providers that can't read pictures
+        order = [p for p in order if p.vision_model != "none"]
     for provider in order:
         for attempt in range(MAX_RETRIES):
             if attempt:
@@ -287,7 +331,7 @@ IMAGE_DATA_URL = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(min_length=1, max_length=10000)
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
     web: bool = False  # True = always search the web for this message
     images: list[str] = Field(default_factory=list, max_length=MAX_IMAGES)  # data:image/...;base64,...
@@ -349,12 +393,12 @@ def health():
         "voice": _groq is not None,
         "providers": [f"{p.name} ({p.model})" for p in PROVIDERS],
     }
-#hi
+
 
 @app.get("/models")
 def models(user: dict = Depends(auth.current_user)):
     """Providers for the model picker (only the ones with an API key in .env)."""
-    return [{"id": p.name.lower(), "label": f"{p.name} ({p.model})"} for p in PROVIDERS]
+    return [{"id": p.name.lower(), "label": p.name} for p in PROVIDERS]
 
 
 # ------------------------------------------------------------------ voice (step 9)
