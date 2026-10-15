@@ -181,8 +181,9 @@ def delete_history(session_id: str) -> int:
         _db.commit()
     return removed
 
+
 def build_messages(question: str, session_id: str, web: bool = False,
-    images: list[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+                   images: list[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     history = get_history(session_id)
     # Short follow-ups ("explain more") search better with the previous question attached.
     last_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
@@ -343,6 +344,7 @@ def health():
         "status": "ok",
         "documents_connected": rag.has_index(),
         "models_configured": bool(PROVIDERS),
+        "voice": _groq is not None,
         "providers": [f"{p.name} ({p.model})" for p in PROVIDERS],
     }
 
@@ -351,6 +353,50 @@ def health():
 def models():
     """Providers for the model picker (only the ones with an API key in .env)."""
     return [{"id": p.name.lower(), "label": f"{p.name} ({p.model})"} for p in PROVIDERS]
+
+
+# ------------------------------------------------------------------ voice (step 9)
+# Speech-to-text with Groq Whisper. Uses the same GROQ_API_KEY as chat.
+STT_MODEL = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en").strip()  # "en", "te", "hi"... or blank = auto-detect
+MAX_AUDIO_MB = 20
+_groq = next((p for p in PROVIDERS if p.name == "Groq"), None)
+
+
+@app.post("/transcribe")
+def transcribe(audio: UploadFile = File(...)):
+    """Turn a short voice recording from the mic button into text."""
+    if not _groq:
+        raise HTTPException(503, "Voice input needs GROQ_API_KEY in .env.")
+    data = audio.file.read()
+    if not data:
+        raise HTTPException(400, "No audio received.")
+    if len(data) > MAX_AUDIO_MB * 1024 * 1024:
+        raise HTTPException(413, "Recording is too long.")
+    options: dict[str, Any] = {"temperature": 0, "response_format": "verbose_json"}
+    if STT_LANGUAGE:  # fixing the language stops Whisper guessing wrong (e.g. Icelandic)
+        options["language"] = STT_LANGUAGE
+    try:
+        result = _groq.client.audio.transcriptions.create(
+            model=STT_MODEL, file=(audio.filename or "voice.webm", data), **options)
+    except Exception as error:
+        logger.warning("Transcription failed: %s", str(error)[:200])
+        raise HTTPException(502, "Couldn't understand the audio. Please try again.") from None
+    return {"text": clean_transcript(result)}
+
+
+def clean_transcript(result: Any) -> str:
+    """Drop the parts Whisper made up from silence or noise (it 'hears' words in quiet bits)."""
+    segments = getattr(result, "segments", None) or []
+    if not segments:
+        return (getattr(result, "text", "") or "").strip()
+    kept = []
+    for seg in segments:
+        get = seg.get if isinstance(seg, dict) else lambda k, d=None: getattr(seg, k, d)
+        if (get("no_speech_prob", 0) or 0) > 0.5 or (get("avg_logprob", 0) or 0) < -1.0:
+            continue  # probably silence or noise
+        kept.append((get("text", "") or "").strip())
+    return " ".join(t for t in kept if t)
 
 
 _upload_lock = threading.Lock()
