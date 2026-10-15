@@ -12,6 +12,9 @@ import re
 from pathlib import Path
 
 import numpy as np
+import numpy as np
+
+import ocr
 
 logger = logging.getLogger("document-chatbot.rag")
 
@@ -21,7 +24,7 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 CHUNK_CHARS = int(os.getenv("CHUNK_CHARS", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
-SUPPORTED = {".pdf", ".docx", ".txt", ".md", ".csv", ".json", ".html", ".htm"}
+SUPPORTED = {".pdf", ".docx", ".txt", ".md", ".csv", ".json", ".html", ".htm"} | ocr.IMAGE_TYPES
 
 _embedder = None
 _chunks: list[dict] | None = None
@@ -44,7 +47,22 @@ def read_pages(path: Path) -> list[tuple[int | None, str]]:
     if suffix == ".pdf":
         from pypdf import PdfReader
         reader = PdfReader(str(path))
-        return [(i + 1, page.extract_text() or "") for i, page in enumerate(reader.pages)]
+        pages, scanned = [], 0
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            # Almost no text = a scanned page (a picture of text), so OCR it.
+            if ocr.OCR_ENABLED and len(text.strip()) < ocr.OCR_MIN_CHARS and scanned < ocr.OCR_MAX_PAGES:
+                scanned += 1
+                try:
+                    text = ocr.read_pdf_page(path, i)
+                except Exception as error:
+                    logger.warning("OCR failed on %s page %s: %s", path.name, i + 1, error)
+            pages.append((i + 1, text))
+        if scanned:
+            logger.info("OCR read %s scanned page(s) in %s", scanned, path.name)
+        return pages
+    if suffix in ocr.IMAGE_TYPES:
+        return [(None, ocr.read_image(path) if ocr.OCR_ENABLED else "")]
     if suffix == ".docx":
         import docx
         document = docx.Document(str(path))
@@ -101,7 +119,7 @@ def build_index() -> int:
         print(f"  {path.name}: {count} chunks")
 
     if not chunks:
-        raise SystemExit("No text could be extracted. Scanned PDFs need OCR first.")
+        raise SystemExit("No text could be extracted. Even OCR found no text.")
 
     print(f"Embedding {len(chunks)} chunks locally with {EMBED_MODEL} ...")
     vectors = _embed([c["text"] for c in chunks])

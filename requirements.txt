@@ -9,3 +9,6 @@ pypdf
 python-docx
 ddgs
 httpx
+rapidocr
+onnxruntime
+pypdfium2
