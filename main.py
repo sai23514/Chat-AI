@@ -63,6 +63,7 @@ class Provider:
     client: OpenAI
     model: str
     extra: dict[str, Any]
+    vision_model: str = ""  # model used when the message has images
 
 
 PROVIDER_SETTINGS = {
@@ -71,6 +72,7 @@ PROVIDER_SETTINGS = {
         "key": "GEMINI_API_KEY",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "model_env": "GEMINI_MODEL", "default_model": "gemini-3.8-flash",
+        "vision_env": "GEMINI_VISION_MODEL", "default_vision_model": "",  # "" = same model (Gemini sees images)
         "extra": {"reasoning_effort": "low"},
     },
     "groq": {
@@ -78,6 +80,7 @@ PROVIDER_SETTINGS = {
         "key": "GROQ_API_KEY",
         "base_url": "https://api.groq.com/openai/v1",
         "model_env": "GROQ_MODEL", "default_model": "openai/gpt-oss-120b",
+        "vision_env": "GROQ_VISION_MODEL", "default_vision_model": "qwen/qwen3.8-27b",
         "extra": {},
     },
     "openrouter": {
@@ -85,6 +88,7 @@ PROVIDER_SETTINGS = {
         "key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "model_env": "OPENROUTER_MODEL", "default_model": "openrouter/free",
+        "vision_env": "OPENROUTER_VISION_MODEL", "default_vision_model": "",  # free router picks a vision model
         "extra": {},
     },
 }
@@ -100,7 +104,8 @@ def load_providers() -> list[Provider]:
             continue
         client = OpenAI(api_key=api_key, base_url=cfg["base_url"], timeout=60, max_retries=0)
         model = os.getenv(cfg["model_env"], "").strip() or cfg["default_model"]
-        providers.append(Provider(cfg["label"], client, model, cfg["extra"]))
+        vision_model = os.getenv(cfg["vision_env"], "").strip() or cfg["default_vision_model"] or model
+        providers.append(Provider(cfg["label"], client, model, cfg["extra"], vision_model))
         logger.info("Provider ready: %s (%s)", cfg["label"], model)
     if not providers:
         raise RuntimeError("No API keys found. Set GEMINI_API_KEY, GROQ_API_KEY and/or OPENROUTER_API_KEY in .env")
@@ -179,7 +184,8 @@ def delete_history(session_id: str) -> int:
 
 
 # ------------------------------------------------------------------ prompt
-def build_messages(question: str, session_id: str, web: bool = False) -> tuple[list[dict[str, str]], list[str]]:
+def build_messages(question: str, session_id: str, web: bool = False,
+    images: list[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     history = get_history(session_id)
     # Short follow-ups ("explain more") search better with the previous question attached.
     last_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
@@ -208,6 +214,10 @@ def build_messages(question: str, session_id: str, web: bool = False) -> tuple[l
     # Without excerpts or results, the plain question is sent (normal chat).
     content = "\n\n".join(parts + [f"USER MESSAGE:\n{question}"]) if parts else question
 
+    # Images go next to the text as "image_url" parts (OpenAI vision format).
+    if images:
+        content = [{"type": "text", "text": content},
+                   *({"type": "image_url", "image_url": {"url": url}} for url in images)]
     today = time.strftime("%A, %d %B %Y")
     messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n\nToday's date is {today}."}, *history,
                 {"role": "user", "content": content}]
@@ -215,8 +225,8 @@ def build_messages(question: str, session_id: str, web: bool = False) -> tuple[l
 
 
 # ------------------------------------------------------------------ calling AI
-def ask_ai(messages: list[dict[str, str]], *, stream: bool):
-    """Try providers in order. Returns (response, provider)."""
+def ask_ai(messages: list[dict[str, Any]], *, stream: bool, vision: bool = False):
+    """Try providers in order. Returns (response, provider). vision=True uses each provider's image model."""
     last_error: Exception | None = None
     for provider in provider_order():
         for attempt in range(MAX_RETRIES):
@@ -224,7 +234,8 @@ def ask_ai(messages: list[dict[str, str]], *, stream: bool):
                 time.sleep(RETRY_BASE_SECONDS * (2 ** attempt) + random.uniform(0, 0.5))
             try:
                 response = provider.client.chat.completions.create(
-                    model=provider.model, messages=messages, stream=stream, **provider.extra,
+                    model=provider.vision_model if vision else provider.model,
+                    messages=messages, stream=stream, **provider.extra,
                 )
                 if stream:
                     # Read the first chunk now so errors are caught here and can fail over.
@@ -243,7 +254,8 @@ def ask_ai(messages: list[dict[str, str]], *, stream: bool):
                     cool_down(provider, COOLDOWN_SECONDS)
                     break                       # out of quota -> next provider
                 if not is_retryable(error):
-                    cool_down(provider, COOLDOWN_SECONDS * 5)
+                    if not vision:  # an image error shouldn't block normal text chat
+                        cool_down(provider, COOLDOWN_SECONDS * 5)
                     break                       # bad key / bad model -> next provider
     raise last_error or RuntimeError("No provider available")
 
@@ -261,12 +273,33 @@ def friendly_error(error: Exception) -> str:
 app = FastAPI(title="Chat AI", version="3.1.0",
               description="General AI chat with optional document Q&A and Gemini, Groq and OpenRouter failover.")
 
+MAX_IMAGES = 3
+MAX_IMAGE_CHARS = 7_000_000  # about 5 MB of image after base64
+IMAGE_DATA_URL = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$")
+
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
     web: bool = False  # True = always search the web for this message
+    images: list[str] = Field(default_factory=list, max_length=MAX_IMAGES)  # data:image/...;base64,...
+    
+    @field_validator("images")
+    @classmethod
+    def check_images(cls, value: list[str]) -> list[str]:
+        for url in value:
+            if not IMAGE_DATA_URL.match(url):
+                raise ValueError("images must be PNG, JPEG, WEBP or GIF data URLs")
+            if len(url) > MAX_IMAGE_CHARS:
+                raise ValueError("each image must be under about 5 MB")
+        return value
+
+    def history_text(self) -> str:
+        """What gets saved in chats.db (images themselves aren't stored)."""
+        if not self.images:
+            return self.message
+        return f"{self.message}\n[{len(self.images)} image(s) attached]"
 
     @field_validator("message")
     @classmethod
@@ -368,10 +401,10 @@ def delete_chat(session_id: str):
 def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     try:
-        messages, sources = build_messages(request.message, session_id, request.web)
-        response, provider = ask_ai(messages, stream=False)
+        messages, sources = build_messages(request.message, session_id, request.web, request.images)
+        response, provider = ask_ai(messages, stream=False, vision=bool(request.images))
         reply = response.choices[0].message.content or ""
-        save_turn(session_id, request.message, reply)
+        save_turn(session_id, request.history_text(), reply)
         return ChatResponse(reply=reply, session_id=session_id, sources=sources, provider=provider.name)
     except Exception as error:
         logger.exception("Chat request failed")
@@ -389,8 +422,8 @@ def chat_stream(request: ChatRequest):
         yield line({"type": "session", "session_id": session_id})
         answer = ""
         try:
-            messages, sources = build_messages(request.message, session_id, request.web)
-            stream, provider = ask_ai(messages, stream=True)
+            messages, sources = build_messages(request.message, session_id, request.web, request.images)
+            stream, provider = ask_ai(messages, stream=True, vision=bool(request.images))
             yield line({"type": "provider", "name": provider.name, "model": provider.model})
             for chunk in stream:
                 if not chunk.choices:
@@ -399,7 +432,7 @@ def chat_stream(request: ChatRequest):
                 if text:
                     answer += text
                     yield line({"type": "text", "text": text})
-            save_turn(session_id, request.message, answer)
+            save_turn(session_id, request.history_text(), answer)
             yield line({"type": "sources", "sources": sources})
         except Exception as error:
             logger.exception("Streaming request failed")
