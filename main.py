@@ -349,7 +349,7 @@ def health():
         "voice": _groq is not None,
         "providers": [f"{p.name} ({p.model})" for p in PROVIDERS],
     }
-
+#hi
 
 @app.get("/models")
 def models(user: dict = Depends(auth.current_user)):

@@ -190,7 +190,7 @@ def login(creds: Credentials, response: Response):
     start_login(row[0], response)
     return {"user": {"id": row[0], "email": creds.email}}
 
-
+# logout
 @router.post("/logout")
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
