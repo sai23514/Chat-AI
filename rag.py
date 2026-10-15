@@ -1,7 +1,8 @@
 """Local document search (RAG) shared by every AI provider.
 
-Shared files: put them in ./docs and run ingest.py (every chat can use them).
-Chat files: uploaded with the + button; only that chat can search them.
+ingest.py calls build_index() to read ./docs, split it into chunks, embed them
+on your own computer (no API key needed) and save them in ./index.
+main.py calls search() to find the chunks that best match a question.
 """
 from __future__ import annotations
 
@@ -11,7 +12,6 @@ import os
 import re
 from pathlib import Path
 
-import numpy as np
 import numpy as np
 
 import ocr
@@ -24,9 +24,18 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 CHUNK_CHARS = int(os.getenv("CHUNK_CHARS", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+# Step 7: hybrid search (meaning + keywords) and reranking
+HYBRID_SEARCH = os.getenv("HYBRID_SEARCH", "true").lower() == "true"
+RERANK = os.getenv("RERANK", "true").lower() == "true"
+RERANK_MODEL = os.getenv("RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+RERANK_MIN_SCORE = float(os.getenv("RERANK_MIN_SCORE", "-7"))  # unrelated text scores about -11
+RERANK_GAP = float(os.getenv("RERANK_GAP", "8"))  # also drop chunks far below the best one
+CANDIDATES = int(os.getenv("CANDIDATES", "20"))  # how many chunks each search hands to the reranker
 SUPPORTED = {".pdf", ".docx", ".txt", ".md", ".csv", ".json", ".html", ".htm"} | ocr.IMAGE_TYPES
 
 _embedder = None
+_reranker = None
+_tokens: list[list[str]] | None = None  # keyword (BM25) cache, rebuilt when the index changes
 _chunks: list[dict] | None = None
 _vectors: np.ndarray | None = None
 
@@ -119,7 +128,7 @@ def build_index() -> int:
         print(f"  {path.name}: {count} chunks")
 
     if not chunks:
-        raise SystemExit("No text could be extracted. Even OCR found no text.")
+        raise SystemExit("No text could be extracted, even with OCR.")
 
     print(f"Embedding {len(chunks)} chunks locally with {EMBED_MODEL} ...")
     vectors = _embed([c["text"] for c in chunks])
@@ -140,8 +149,8 @@ def _embed(texts: list[str]) -> np.ndarray:
 
 
 def _save(chunks: list[dict], vectors: np.ndarray) -> None:
-    global _chunks, _vectors
-    _chunks, _vectors = chunks, vectors
+    global _chunks, _vectors, _tokens
+    _chunks, _vectors, _tokens = chunks, vectors, None
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     np.save(INDEX_DIR / "vectors.npy", vectors)
     (INDEX_DIR / "chunks.json").write_text(json.dumps(chunks, ensure_ascii=False), encoding="utf-8")
@@ -179,7 +188,8 @@ def remove_files(session_id: str, name: str | None = None) -> int:
 
 
 def load_index() -> bool:
-    global _chunks, _vectors
+    global _chunks, _vectors, _tokens
+    _tokens = None
     vec_path, chunk_path = INDEX_DIR / "vectors.npy", INDEX_DIR / "chunks.json"
     if not (vec_path.is_file() and chunk_path.is_file()):
         logger.warning("No document index found. Run: python ingest.py")
@@ -214,6 +224,96 @@ def search(query: str, k: int = 5, min_score: float = 0.35, session_id: str | No
         {**_chunks[i], "score": float(scores[i])}
         for i in best if scores[i] >= min_score and scores[i] >= top - 0.15
     ]
+
+
+# ---------------------------------------------------------------- step 7: hybrid
+STOPWORDS = set("""a an and are as at be by for from has have how i in is it its of on or
+that the this to was were what when where which who why will with you your me my
+about does did do can could should would please tell give show much many""".split())
+
+
+def tokenize(text: str) -> list[str]:
+    """Words for keyword search. Codes like C-7 or SSM-2026-0417 are kept whole AND split."""
+    words = []
+    for word in re.findall(r"[a-z0-9]+(?:[-/.,][a-z0-9]+)*", text.lower()):
+        if word not in STOPWORDS:
+            words.append(word)
+        parts = re.split(r"[-/.,]", word)
+        if len(parts) > 1:
+            words += [p for p in parts if p and p not in STOPWORDS]
+    return words
+
+
+def keyword_scores(query: str, k1: float = 1.5, b: float = 0.75) -> np.ndarray:
+    """BM25: rare words that appear in a chunk score high; common words barely count."""
+    global _tokens
+    if _tokens is None:
+        _tokens = [tokenize(c["text"]) for c in _chunks]
+    n = len(_tokens)
+    lengths = np.array([len(t) for t in _tokens], dtype=np.float32)
+    avg = float(lengths.mean()) or 1.0
+    scores = np.zeros(n, dtype=np.float32)
+    for term in set(tokenize(query)):
+        tf = np.array([t.count(term) for t in _tokens], dtype=np.float32)
+        df = int((tf > 0).sum())
+        if not df:
+            continue
+        idf = np.log(1 + (n - df + 0.5) / (df + 0.5))
+        scores += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * lengths / avg))
+    return scores
+
+
+def reranker():
+    """Load the reranking model once (downloads ~80 MB on first use)."""
+    global _reranker
+    if _reranker is None:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        _reranker = TextCrossEncoder(model_name=RERANK_MODEL)
+    return _reranker
+
+
+def hybrid_search(query: str, k: int = 5, min_score: float = 0.6,
+                  session_id: str | None = None) -> list[dict]:
+    """Meaning search + keyword search, merged, then re-checked by the reranker."""
+    if not HYBRID_SEARCH:
+        return search(query, k=k, min_score=min_score, session_id=session_id)
+    if not has_index():
+        return []
+    allowed = np.array([not c.get("session") or c.get("session") == session_id for c in _chunks])
+    if not allowed.any():
+        return []
+
+    # 1) Meaning (vectors). Looser cut than before: the reranker removes the weak ones.
+    q = np.array(next(iter(embedder().query_embed(query))), dtype=np.float32)
+    q /= np.linalg.norm(q) + 1e-12
+    vec = np.where(allowed, _vectors @ q, -1.0)
+    vec_floor = min_score - 0.25 if RERANK else min_score
+    by_meaning = [i for i in np.argsort(-vec)[:CANDIDATES] if vec[i] >= vec_floor]
+
+    # 2) Keywords (BM25)
+    kw = np.where(allowed, keyword_scores(query), 0.0)
+    by_keyword = [i for i in np.argsort(-kw)[:CANDIDATES] if kw[i] > 0]
+
+    # 3) Merge with Reciprocal Rank Fusion: high in either list = high overall
+    fused: dict[int, float] = {}
+    for ranking in (by_meaning, by_keyword):
+        for rank, i in enumerate(ranking):
+            fused[int(i)] = fused.get(int(i), 0.0) + 1 / (60 + rank)
+    candidates = sorted(fused, key=fused.get, reverse=True)[:CANDIDATES]
+    if not candidates:
+        return []
+
+    # 4) Rerank: read question + chunk together for a sharper score
+    if RERANK:
+        try:
+            scores = list(reranker().rerank(query, [_chunks[i]["text"] for i in candidates]))
+            ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+            best = float(ranked[0][1])
+            return [{**_chunks[i], "score": float(s)} for i, s in ranked[:k]
+                    if s >= RERANK_MIN_SCORE and s >= best - RERANK_GAP]
+        except Exception as error:
+            logger.warning("Reranker failed, using merged results: %s", error)
+    return [{**_chunks[i], "score": float(vec[i])} for i in candidates[:k]]
 
 
 def source_label(chunk: dict) -> str:

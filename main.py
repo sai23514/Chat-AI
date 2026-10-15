@@ -190,7 +190,7 @@ def build_messages(question: str, session_id: str, web: bool = False,
     # Short follow-ups ("explain more") search better with the previous question attached.
     last_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
     query = f"{last_user}\n{question}" if last_user and len(question.split()) < 8 else question
-    hits = rag.search(query, k=TOP_K, min_score=MIN_SCORE, session_id=session_id)
+    hits = rag.hybrid_search(query, k=TOP_K, min_score=MIN_SCORE, session_id=session_id)
 
     sources: list[str] = []
     for hit in hits:
@@ -321,6 +321,8 @@ def warm_up() -> None:
     rag.load_index()
     if rag.has_index():
         rag.embedder()  # load the embedding model before the first question
+        if rag.RERANK:
+            rag.reranker()  # load the reranker too (step 7)
 
 
 @app.get("/")
