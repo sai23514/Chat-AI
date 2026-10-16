@@ -974,12 +974,13 @@
       .replace(/`([^`]+)`/g, "<code>$1</code>")
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-     const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/&lt;br\s*\/?&gt;/gi, "<br>")   // AI sends <br> for a new line
+      .replace(/&lt;hr\s*\/?&gt;/gi, "<hr>"); const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
     const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
     function renderMarkdown(src) {
       let html = "";
-      escapeHtml(src).split(/```/).forEach((part, i) => {
+      escapeHtml(src).replace(/&lt;br\s*\/?&gt;/gi, "<br>").split(/```/).forEach((part, i) => {
         if (i % 2) { html += `<pre><code>${part.replace(/^[\w-]*\n/, "")}</code></pre>`; return; }
         let list = null, para = [];
         const flush = () => { if (para.length) { html += `<p>${inline(para.join("<br>"))}</p>`; para = []; } };
