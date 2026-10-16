@@ -618,6 +618,15 @@
     .model-menu button { white-space: nowrap; }
     @keyframes pickIn { from { opacity: 0; transform: scale(.92) translateY(6px); } to { opacity: 1; transform: none; } }
     @media (max-width: 600px) { .model-btn { max-width: 100px; } }
+   /* Tables, quotes, rules in answers */
+    .content .table-wrap { overflow-x: auto; margin: 0 0 12px; border: 1px solid var(--border); border-radius: 10px; }
+    .content table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    .content th, .content td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+    .content th { background: var(--surface-2); font-weight: 600; }
+    .content tr:last-child td { border-bottom: 0; }
+    .content th + th, .content td + td { border-left: 1px solid var(--border); }
+    .content blockquote { margin: 0 0 12px; padding: 4px 12px; border-left: 3px solid var(--border); opacity: .85; }
+    .content hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
   </style>
 </head>
 <body>
@@ -966,6 +975,8 @@
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+     const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+    const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
     function renderMarkdown(src) {
       let html = "";
       escapeHtml(src).split(/```/).forEach((part, i) => {
@@ -973,13 +984,27 @@
         let list = null, para = [];
         const flush = () => { if (para.length) { html += `<p>${inline(para.join("<br>"))}</p>`; para = []; } };
         const close = () => { if (list) { html += `</${list}>`; list = null; } };
-        for (const line of part.split("\n")) {
+        const lines = part.split("\n");
+        for (let k = 0; k < lines.length; k++) {
+          const line = lines[k];
+          // Table: a | row |, then a | --- | --- | divider line
+          if (isRow(line) && k + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[k + 1]) && lines[k + 1].includes("-")) {
+            flush(); close();
+            let t = `<div class="table-wrap"><table><thead><tr>${cells(line).map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>`;
+            k += 2;
+            while (k < lines.length && isRow(lines[k])) {
+              t += `<tr>${cells(lines[k]).map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`; k++;
+            }
+            html += t + "</tbody></table></div>"; k--; continue;
+          }
           const ul = line.match(/^\s*[-*•]\s+(.*)/), ol = line.match(/^\s*\d+[.)]\s+(.*)/), h = line.match(/^(#{1,4})\s+(.*)/);
           if (ul || ol) {
             flush(); const t = ul ? "ul" : "ol";
             if (list !== t) { close(); html += `<${t}>`; list = t; }
             html += `<li>${inline((ul || ol)[1])}</li>`;
           } else if (h) { flush(); close(); const n = h[1].length > 2 ? 4 : 3; html += `<h${n}>${inline(h[2])}</h${n}>`; }
+          else if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flush(); close(); html += "<hr>"; }
+          else if (/^\s*&gt;\s?/.test(line)) { flush(); close(); html += `<blockquote>${inline(line.replace(/^\s*&gt;\s?/, ""))}</blockquote>`; }
           else if (!line.trim()) { flush(); close(); }
           else { close(); para.push(line); }
         }
