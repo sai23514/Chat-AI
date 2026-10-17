@@ -1,4 +1,5 @@
 # Chat AI
+live link- https://chat-ai.malaysiawest.cloudapp.azure.com/
 
 A general-purpose AI chat app I built from scratch with FastAPI. You can just chat with it like any assistant, or upload your own files and ask questions about them. Behind the scenes it talks to several free AI providers, and when one is busy or out of quota, the next one picks up automatically, so the chat keeps working.
 
